@@ -1,0 +1,250 @@
+@page "/archetype/{Name}"
+@rendermode InteractiveServer
+@using System.Text.Json
+@using MTGTournamentDashboard.Querying
+@using MTGTournamentDashboard.Sync.Models
+@inject MetagameQuery Query
+@inject NavigationManager Nav
+
+<PageTitle>@DisplayName · Metagame</PageTitle>
+
+<nav class="mb-3" aria-label="breadcrumb">
+    <ol class="breadcrumb mb-0">
+        <li class="breadcrumb-item"><a href="@BackToMetagame">Metagame</a></li>
+        <li class="breadcrumb-item active">@DisplayName</li>
+    </ol>
+</nav>
+
+<h1>@DisplayName</h1>
+
+@if (_loading)
+{
+    <p><span class="spinner-border spinner-border-sm me-2"></span>Cargando…</p>
+}
+else if (_header is null)
+{
+    <div class="alert alert-warning">No hay decks de <strong>@DisplayName</strong> en el rango @FromDate.ToString("yyyy-MM-dd") → @ToDate.ToString("yyyy-MM-dd")@(IncludeLeagues ? " (con Leagues)" : " (sin Leagues)") con las fuentes @SourceLabel.</div>
+}
+else
+{
+    <div class="row g-2 mb-3">
+        <div class="col-md-3">
+            <div class="border rounded p-2">
+                <div class="small text-muted">Decks</div>
+                <div class="fs-4">@_header.DeckCount</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="border rounded p-2">
+                <div class="small text-muted">% del meta</div>
+                <div class="fs-4">@((_header.MetaShare * 100).ToString("F1"))%</div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="border rounded p-2">
+                <div class="small text-muted">Winrate</div>
+                <div class="fs-4">
+                    @if (_header.MatchCount > 0)
+                    {
+                        <span>@((_header.Winrate * 100).ToString("F1"))%</span>
+                    }
+                    else
+                    {
+                        <span>—</span>
+                    }
+                    @if (_header.LowSample)
+                    {
+                        <small class="text-warning ms-1" title="Muestra pequeña (<30 matches)">⚠</small>
+                    }
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="border rounded p-2">
+                <div class="small text-muted">Matches</div>
+                <div class="fs-4">@_header.MatchCount <small class="text-muted">(@_header.Wins-@_header.Losses-@_header.Draws)</small></div>
+            </div>
+        </div>
+    </div>
+
+    <p class="text-muted small">
+        Rango: @FromDate.ToString("yyyy-MM-dd") → @ToDate.ToString("yyyy-MM-dd").
+        Fuentes: @SourceLabel.
+        @(IncludeLeagues ? "Leagues incluidas." : "Leagues excluidas.")
+        Mostrando top @_decks.Count decks (orden: wins desc).
+    </p>
+
+    @if (SourceFilter.Contains(TournamentSources.Mtgo))
+    {
+        <div class="alert alert-warning small py-2">
+            <strong>Aviso:</strong> MTGO publica solo top finishers, así que el winrate de este arquetipo está infladado por el sesgo de publicación.
+        </div>
+    }
+
+    <table class="table table-sm table-hover align-middle">
+        <thead class="table-light">
+            <tr>
+                <th style="width: 4%"></th>
+                <th>Jugador</th>
+                <th>Torneo</th>
+                <th class="text-end">Fecha</th>
+                <th class="text-end">W-L-D</th>
+                <th class="text-end">Rank</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var d in _decks)
+            {
+                var isOpen = _expandedDeckId == d.DeckId;
+                <tr style="cursor: pointer;" @onclick="() => ToggleDeck(d.DeckId)">
+                    <td class="text-center">@(isOpen ? "▾" : "▸")</td>
+                    <td>@d.PlayerName</td>
+                    <td>
+                        <span>@d.TournamentName</span>
+                        <small class="text-muted ms-1">[@d.TournamentSource]</small>
+                    </td>
+                    <td class="text-end"><small>@d.TournamentDate.ToString("yyyy-MM-dd")</small></td>
+                    <td class="text-end"><small>@d.Wins-@d.Losses-@d.Draws</small></td>
+                    <td class="text-end"><small>@(d.FinalRank?.ToString() ?? "—")</small></td>
+                </tr>
+                @if (isOpen)
+                {
+                    <tr>
+                        <td colspan="6" class="bg-light">
+                            @RenderDecklist(d)
+                        </td>
+                    </tr>
+                }
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    [Parameter] public string Name { get; set; } = "";
+
+    [SupplyParameterFromQuery] public string? From { get; set; }
+    [SupplyParameterFromQuery] public string? To { get; set; }
+    [SupplyParameterFromQuery] public bool? Leagues { get; set; }
+    [SupplyParameterFromQuery] public string? Sources { get; set; }
+
+    private const string Format = "Modern";
+
+    private DateTime FromDate { get; set; }
+    private DateTime ToDate { get; set; }
+    private bool IncludeLeagues { get; set; }
+    private HashSet<string> SourceFilter { get; set; } = new(StringComparer.Ordinal);
+
+    private string DisplayName => Uri.UnescapeDataString(Name);
+    private string BackToMetagame => "/metagame";
+    private string SourceLabel => SourceFilter.Count == 0 ? "(todas)" : string.Join(", ", SourceFilter);
+
+    private bool _loading = true;
+    private ArchetypeStat? _header;
+    private IReadOnlyList<ArchetypeDeckRow> _decks = Array.Empty<ArchetypeDeckRow>();
+    private int? _expandedDeckId;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        FromDate = DateTime.TryParse(From, out var f) ? f : DateTime.UtcNow.Date.AddDays(-30);
+        ToDate = DateTime.TryParse(To, out var t) ? t : DateTime.UtcNow.Date;
+        IncludeLeagues = Leagues ?? false;
+        SourceFilter = new HashSet<string>(
+            (Sources ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            StringComparer.Ordinal);
+
+        _loading = true;
+        StateHasChanged();
+        try
+        {
+            var name = DisplayName;
+            var (header, decks) = await Query.GetArchetypeDetailAsync(
+                name, Format, FromDate, ToDate.AddDays(1).AddTicks(-1), IncludeLeagues,
+                sources: SourceFilter.Count > 0 ? SourceFilter : null,
+                deckLimit: 50);
+            _header = header;
+            _decks = decks;
+            _expandedDeckId = null;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void ToggleDeck(int id)
+    {
+        _expandedDeckId = _expandedDeckId == id ? null : id;
+    }
+
+    private RenderFragment RenderDecklist(ArchetypeDeckRow d) => builder =>
+    {
+        var main = ParseCards(d.MainboardJson);
+        var side = ParseCards(d.SideboardJson);
+
+        builder.OpenElement(0, "div");
+        builder.AddAttribute(1, "class", "row g-3 py-2");
+
+        // Mainboard
+        builder.OpenElement(2, "div");
+        builder.AddAttribute(3, "class", "col-md-6");
+        builder.OpenElement(4, "h6");
+        builder.AddAttribute(5, "class", "small text-muted text-uppercase");
+        builder.AddContent(6, $"Mainboard ({main.Sum(c => c.Count)})");
+        builder.CloseElement();
+        AppendCardList(builder, 7, main);
+        builder.CloseElement();
+
+        // Sideboard
+        builder.OpenElement(8, "div");
+        builder.AddAttribute(9, "class", "col-md-6");
+        builder.OpenElement(10, "h6");
+        builder.AddAttribute(11, "class", "small text-muted text-uppercase");
+        builder.AddContent(12, $"Sideboard ({side.Sum(c => c.Count)})");
+        builder.CloseElement();
+        AppendCardList(builder, 13, side);
+        builder.CloseElement();
+
+        builder.CloseElement();
+    };
+
+    private static void AppendCardList(Microsoft.AspNetCore.Components.Rendering.RenderTreeBuilder builder, int seq, List<(string Name, int Count)> cards)
+    {
+        builder.OpenElement(seq, "ul");
+        builder.AddAttribute(seq + 1, "class", "list-unstyled mb-0 small");
+        int i = seq + 2;
+        foreach (var (cardName, count) in cards)
+        {
+            builder.OpenElement(i++, "li");
+            builder.OpenElement(i++, "span");
+            builder.AddAttribute(i++, "class", "text-muted me-2");
+            builder.AddContent(i++, count.ToString().PadLeft(2));
+            builder.CloseElement();
+            builder.AddContent(i++, cardName);
+            builder.CloseElement();
+        }
+        builder.CloseElement();
+    }
+
+    private static List<(string Name, int Count)> ParseCards(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json) || json == "[]")
+            return new();
+
+        try
+        {
+            var items = JsonSerializer.Deserialize<CacheDeckItem[]>(json) ?? Array.Empty<CacheDeckItem>();
+            return items
+                .Where(i => !string.IsNullOrWhiteSpace(i.CardName))
+                .GroupBy(i => i.CardName!)
+                .Select(g => (g.Key, g.Sum(x => x.Count)))
+                .OrderByDescending(t => t.Item2)
+                .ThenBy(t => t.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch (JsonException)
+        {
+            return new();
+        }
+    }
+}
