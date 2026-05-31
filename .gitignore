@@ -480,3 +480,17 @@ $RECYCLE.BIN/
 
 # Vim temporary swap files
 *.swp
+
+# --- MTGTournamentDashboard ---
+# Machine-specific config override (rutas F:\..., nunca versionado)
+appsettings.Local.json
+# Local runtime state / build staging (no es código)
+dist/
+data/
+# SQLite databases + WAL/SHM
+*.db
+*.db-shm
+*.db-wal
+# diag dumps
+diag-stdout.txt
+diag-stderr.txt

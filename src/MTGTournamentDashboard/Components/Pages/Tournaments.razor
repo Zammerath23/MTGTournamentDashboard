@@ -1,9 +1,182 @@
 @page "/tournaments"
+@rendermode InteractiveServer
+@using Microsoft.AspNetCore.Components.QuickGrid
+@using MTGTournamentDashboard.Data.Entities
+@using MTGTournamentDashboard.Querying
+@inject MetagameQuery Query
 
 <PageTitle>Tournaments</PageTitle>
 
 <h1>Tournaments</h1>
 
-<p>Listado de torneos sincronizados.</p>
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label mb-1">Desde</label>
+                <input type="date" class="form-control form-control-sm" @bind="_from" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-1">Hasta</label>
+                <input type="date" class="form-control form-control-sm" @bind="_to" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-6">
+                <label class="form-label mb-1">Fuentes</label>
+                <div class="d-flex gap-3 flex-wrap">
+                    @foreach (var src in TournamentSources.All)
+                    {
+                        var s = src;
+                        <div class="form-check">
+                            <input type="checkbox" class="form-check-input" id="src-@s"
+                                   checked="@_sources.Contains(s)"
+                                   @onchange="e => ToggleSource(s, (bool)(e.Value ?? false))" />
+                            <label class="form-check-label small" for="src-@s">@s</label>
+                        </div>
+                    }
+                </div>
+            </div>
+        </div>
+        <div class="row g-2 mt-1">
+            <div class="col-12">
+                <small class="text-muted">
+                    @if (_availableRange is { } r)
+                    {
+                        <span>Datos disponibles: @r.Min.ToString("yyyy-MM-dd") → @r.Max.ToString("yyyy-MM-dd").</span>
+                    }
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseAllAvailable">usar todo</button>
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseLast30">últimos 30 días</button>
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseLast90">últimos 90 días</button>
+                </small>
+            </div>
+        </div>
+    </div>
+</div>
 
-<p><em>Pendiente de implementar: tabla con filtros por fechas, fuente y formato.</em></p>
+@if (_loading)
+{
+    <p><span class="spinner-border spinner-border-sm me-2"></span>Cargando…</p>
+}
+else if (_rows.Count == 0)
+{
+    <div class="alert alert-warning">Sin torneos en el rango seleccionado.</div>
+}
+else
+{
+    <p class="text-muted small mb-2"><strong>@_rows.Count</strong> torneos.</p>
+
+    <QuickGrid Items="@_rows.AsQueryable()" Pagination="@_pagination" class="table table-sm table-hover align-middle">
+        <PropertyColumn Property="@(t => t.Date)" Title="Fecha" Format="yyyy-MM-dd" Sortable="true" InitialSortDirection="SortDirection.Descending" IsDefaultSortColumn="true" />
+        <PropertyColumn Property="@(t => t.Source)" Title="Fuente" Sortable="true" />
+        <TemplateColumn Title="Torneo" SortBy="@_nameSort">
+            @if (!string.IsNullOrEmpty(context.SourceUrl))
+            {
+                <a href="@context.SourceUrl" target="_blank" rel="noopener">@context.Name</a>
+            }
+            else
+            {
+                @context.Name
+            }
+        </TemplateColumn>
+        <PropertyColumn Property="@(t => t.PlayerCount)" Title="Jugadores" Align="Align.End" Sortable="true" />
+        <PropertyColumn Property="@(t => t.DeckCount)" Title="Mazos" Align="Align.End" Sortable="true" />
+        <TemplateColumn Title="Estado" Align="Align.Center">
+            @if (context.Status == TournamentStatus.Completed)
+            {
+                <span class="badge text-bg-success">Completo</span>
+            }
+            else
+            {
+                <span class="badge text-bg-secondary">En curso</span>
+            }
+        </TemplateColumn>
+        <TemplateColumn Title="Winrate" Align="Align.Center">
+            @if (context.IncludeInWinrate)
+            {
+                <span title="Cuenta para el cálculo de winrate">✓</span>
+            }
+            else
+            {
+                <span class="text-muted" title="Excluido del winrate (p. ej. Leagues 5-0 de MTGO)">—</span>
+            }
+        </TemplateColumn>
+    </QuickGrid>
+
+    <Paginator State="@_pagination" />
+}
+
+@code {
+    private const string Format = "Modern";
+
+    private static readonly GridSort<TournamentRow> _nameSort = GridSort<TournamentRow>.ByAscending(t => t.Name);
+
+    private DateTime _from;
+    private DateTime _to;
+    private HashSet<string> _sources = new(StringComparer.Ordinal) { TournamentSources.Melee, TournamentSources.Mtgo };
+
+    private bool _loading;
+    private IReadOnlyList<TournamentRow> _rows = Array.Empty<TournamentRow>();
+    private (DateTime Min, DateTime Max)? _availableRange;
+    private readonly PaginationState _pagination = new() { ItemsPerPage = 25 };
+
+    protected override async Task OnInitializedAsync()
+    {
+        _availableRange = await Query.GetAvailableRangeAsync(Format);
+        if (_availableRange is { } r)
+        {
+            _to = r.Max.Date;
+            _from = r.Min.Date;
+        }
+        else
+        {
+            _to = DateTime.UtcNow.Date;
+            _from = _to.AddDays(-30);
+        }
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        StateHasChanged();
+        try
+        {
+            _rows = await Query.GetTournamentsAsync(Format, _from, _to.AddDays(1).AddTicks(-1), _sources);
+            await _pagination.SetCurrentPageIndexAsync(0);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task ToggleSource(string source, bool isChecked)
+    {
+        if (isChecked) _sources.Add(source);
+        else _sources.Remove(source);
+        await ReloadAsync();
+    }
+
+    private async Task UseAllAvailable()
+    {
+        if (_availableRange is not { } r) return;
+        _from = r.Min.Date;
+        _to = r.Max.Date;
+        await ReloadAsync();
+    }
+
+    private async Task UseLast30()
+    {
+        var anchor = _availableRange?.Max ?? DateTime.UtcNow.Date;
+        _to = anchor.Date;
+        _from = anchor.Date.AddDays(-30);
+        await ReloadAsync();
+    }
+
+    private async Task UseLast90()
+    {
+        var anchor = _availableRange?.Max ?? DateTime.UtcNow.Date;
+        _to = anchor.Date;
+        _from = anchor.Date.AddDays(-90);
+        await ReloadAsync();
+    }
+}

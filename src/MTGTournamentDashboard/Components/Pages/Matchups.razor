@@ -1,9 +1,251 @@
 @page "/matchups"
+@rendermode InteractiveServer
+@using System.Globalization
+@using MTGTournamentDashboard.Querying
+@inject MetagameQuery Query
 
 <PageTitle>Matchups</PageTitle>
 
 <h1>Matchup Matrix</h1>
 
-<p>Matriz de winrate por matchup entre arquetipos.</p>
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label mb-1">Desde</label>
+                <input type="date" class="form-control form-control-sm" @bind="_from" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label mb-1">Hasta</label>
+                <input type="date" class="form-control form-control-sm" @bind="_to" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label mb-1">Top arquetipos</label>
+                <input type="number" min="4" max="25" class="form-control form-control-sm" @bind="_topN" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label mb-1">Muestra mínima</label>
+                <input type="number" min="1" max="200" class="form-control form-control-sm" @bind="_minSample" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label mb-1">Fuentes</label>
+                <div class="d-flex gap-3 flex-wrap">
+                    @foreach (var src in TournamentSources.All)
+                    {
+                        var s = src;
+                        <div class="form-check">
+                            <input type="checkbox" class="form-check-input" id="src-@s"
+                                   checked="@_sources.Contains(s)"
+                                   @onchange="e => ToggleSource(s, (bool)(e.Value ?? false))" />
+                            <label class="form-check-label small" for="src-@s">@s</label>
+                        </div>
+                    }
+                </div>
+                <div class="form-check mt-1">
+                    <input type="checkbox" class="form-check-input" id="includeLeagues"
+                           @bind="_includeLeagues" @bind:after="ReloadAsync" />
+                    <label class="form-check-label small" for="includeLeagues">Incluir Leagues 5-0</label>
+                </div>
+            </div>
+        </div>
+        <div class="row g-2 mt-1">
+            <div class="col-12">
+                <small class="text-muted">
+                    @if (_availableRange is { } r)
+                    {
+                        <span>Datos disponibles: @r.Min.ToString("yyyy-MM-dd") → @r.Max.ToString("yyyy-MM-dd").</span>
+                    }
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseAllAvailable">usar todo</button>
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseLast30">últimos 30 días</button>
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseLast90">últimos 90 días</button>
+                </small>
+            </div>
+        </div>
+    </div>
+</div>
 
-<p><em>Pendiente de implementar: heatmap NxN con filtros por fechas y muestra mínima de partidas.</em></p>
+@if (_sources.Contains(TournamentSources.Mtgo))
+{
+    <div class="alert alert-warning small py-2">
+        <strong>Aviso:</strong> MTGO publica solo los top finishers, así que sus winrates están <em>inflados</em>. Para una matriz honesta, deja solo <strong>Melee</strong> seleccionado.
+    </div>
+}
+
+@if (_loading)
+{
+    <p><span class="spinner-border spinner-border-sm me-2"></span>Cargando…</p>
+}
+else if (_matrix is null || _matrix.Archetypes.Count == 0)
+{
+    <div class="alert alert-warning">Sin arquetipos en el rango seleccionado.</div>
+}
+else if (_matrix.TotalRounds == 0)
+{
+    <div class="alert alert-warning">
+        No hay partidas ronda-a-ronda en el rango/fuentes seleccionados. La matriz se construye desde la tabla
+        <code>Rounds</code>, que se puebla sobre todo con datos de <strong>Melee</strong>.
+    </div>
+}
+else
+{
+    <p class="text-muted small mb-2">
+        Winrate de la <strong>fila</strong> contra la <strong>columna</strong>, sobre
+        <strong>@_matrix.TotalRounds</strong> partidas. Celdas con menos de <strong>@_matrix.MinSample</strong>
+        partidas en gris. Diagonal (espejo) omitida.
+    </p>
+
+    <div style="overflow-x: auto;">
+        <table class="table table-sm table-bordered align-middle text-center mb-0" style="font-size: 0.78rem; width: auto;">
+            <thead>
+                <tr>
+                    <th style="text-align: left; position: sticky; left: 0; background: #fff; z-index: 1;">Fila \ Columna</th>
+                    @for (var i = 0; i < _matrix.Archetypes.Count; i++)
+                    {
+                        <th title="@_matrix.Archetypes[i]" style="min-width: 2.4em;">@(i + 1)</th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @for (var ri = 0; ri < _matrix.Archetypes.Count; ri++)
+                {
+                    var rowArch = _matrix.Archetypes[ri];
+                    <tr>
+                        <th style="text-align: left; white-space: nowrap; position: sticky; left: 0; background: #fff;">
+                            @(ri + 1). @rowArch
+                        </th>
+                        @for (var ci = 0; ci < _matrix.Archetypes.Count; ci++)
+                        {
+                            var colArch = _matrix.Archetypes[ci];
+                            if (ri == ci)
+                            {
+                                <td class="text-muted bg-light">—</td>
+                            }
+                            else if (_matrix.Cells.TryGetValue((rowArch, colArch), out var cell) && cell.Matches > 0)
+                            {
+                                var low = cell.Matches < _matrix.MinSample;
+                                var wr = cell.Winrate ?? 0;
+                                <td style="background: @CellBg(wr, low); color: @CellFg(wr, low);" title="@rowArch vs @colArch: @cell.Wins-@cell.Losses (@cell.Matches)">
+                                    @((wr * 100).ToString("F0", CultureInfo.InvariantCulture))%
+                                    <div style="font-size: 0.7em; opacity: 0.85;">@cell.Matches</div>
+                                </td>
+                            }
+                            else
+                            {
+                                <td class="text-muted">·</td>
+                            }
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    <div class="mt-2 small text-muted">
+        @for (var i = 0; i < _matrix.Archetypes.Count; i++)
+        {
+            <span class="me-3"><strong>@(i + 1).</strong> @_matrix.Archetypes[i]</span>
+        }
+    </div>
+}
+
+@code {
+    private const string Format = "Modern";
+
+    private DateTime _from;
+    private DateTime _to;
+    private bool _includeLeagues;
+    private int _topN = 12;
+    private int _minSample = 20;
+    private HashSet<string> _sources = new(StringComparer.Ordinal) { TournamentSources.Melee };
+
+    private bool _loading;
+    private MatchupMatrix? _matrix;
+    private (DateTime Min, DateTime Max)? _availableRange;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _availableRange = await Query.GetAvailableRangeAsync(Format);
+        if (_availableRange is { } r)
+        {
+            _to = r.Max.Date;
+            _from = r.Max.Date.AddDays(-90);
+            if (_from < r.Min.Date) _from = r.Min.Date;
+        }
+        else
+        {
+            _to = DateTime.UtcNow.Date;
+            _from = _to.AddDays(-90);
+        }
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        StateHasChanged();
+        try
+        {
+            var topN = Math.Clamp(_topN, 4, 25);
+            var minSample = Math.Clamp(_minSample, 1, 200);
+            _matrix = await Query.GetMatchupMatrixAsync(
+                Format, _from, _to.AddDays(1).AddTicks(-1), _includeLeagues, _sources, topN, minSample);
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task ToggleSource(string source, bool isChecked)
+    {
+        if (isChecked) _sources.Add(source);
+        else _sources.Remove(source);
+        await ReloadAsync();
+    }
+
+    private async Task UseAllAvailable()
+    {
+        if (_availableRange is not { } r) return;
+        _from = r.Min.Date;
+        _to = r.Max.Date;
+        await ReloadAsync();
+    }
+
+    private async Task UseLast30()
+    {
+        var anchor = _availableRange?.Max ?? DateTime.UtcNow.Date;
+        _to = anchor.Date;
+        _from = anchor.Date.AddDays(-30);
+        await ReloadAsync();
+    }
+
+    private async Task UseLast90()
+    {
+        var anchor = _availableRange?.Max ?? DateTime.UtcNow.Date;
+        _to = anchor.Date;
+        _from = anchor.Date.AddDays(-90);
+        await ReloadAsync();
+    }
+
+    // Fondo coloreado por winrate; en muestra baja se atenúa hacia gris.
+    private static string CellBg(double wr, bool low)
+    {
+        if (low) return "#f1f3f5";
+        return wr switch
+        {
+            >= 0.60 => "#198754",
+            >= 0.55 => "#5cb85c",
+            >= 0.50 => "#a3d9a5",
+            >= 0.45 => "#f8d7a3",
+            >= 0.40 => "#f0ad4e",
+            _ => "#dc3545"
+        };
+    }
+
+    private static string CellFg(double wr, bool low)
+    {
+        if (low) return "#868e96";
+        // Texto blanco sobre los extremos oscuros, oscuro sobre los tonos claros.
+        return wr is >= 0.60 or < 0.40 ? "#fff" : "#212529";
+    }
+}

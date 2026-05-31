@@ -1,9 +1,274 @@
 @page "/metagame"
+@rendermode InteractiveServer
+@using MTGTournamentDashboard.Querying
+@inject MetagameQuery Query
 
 <PageTitle>Metagame</PageTitle>
 
 <h1>Metagame</h1>
 
-<p>Share del metagame y winrate general por arquetipo.</p>
+<div class="card mb-3">
+    <div class="card-body">
+        <div class="row g-3 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label mb-1">Desde</label>
+                <input type="date" class="form-control form-control-sm" @bind="_from" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-1">Hasta</label>
+                <input type="date" class="form-control form-control-sm" @bind="_to" @bind:after="ReloadAsync" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-1">Ordenar por</label>
+                <select class="form-select form-select-sm" @bind="_sortBy" @bind:after="ApplySort">
+                    <option value="@SortBy.Share">% del meta</option>
+                    <option value="@SortBy.Winrate">Winrate</option>
+                    <option value="@SortBy.DeckCount">Nº decks</option>
+                    <option value="@SortBy.Matches">Nº matches</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-1">Fuentes</label>
+                <div class="d-flex gap-2 flex-wrap">
+                    @foreach (var src in TournamentSources.All)
+                    {
+                        var s = src;
+                        <div class="form-check">
+                            <input type="checkbox" class="form-check-input" id="src-@s"
+                                   checked="@_sources.Contains(s)"
+                                   @onchange="e => ToggleSource(s, (bool)(e.Value ?? false))" />
+                            <label class="form-check-label small" for="src-@s">@s</label>
+                        </div>
+                    }
+                </div>
+                <div class="form-check mt-1">
+                    <input type="checkbox" class="form-check-input" id="includeLeagues"
+                           @bind="_includeLeagues" @bind:after="ReloadAsync" />
+                    <label class="form-check-label small" for="includeLeagues">Incluir Leagues 5-0</label>
+                </div>
+            </div>
+        </div>
+        <div class="row g-2 mt-1">
+            <div class="col-12">
+                <small class="text-muted">
+                    @if (_availableRange is { } r)
+                    {
+                        <span>Datos disponibles: @r.Min.ToString("yyyy-MM-dd") → @r.Max.ToString("yyyy-MM-dd").</span>
+                    }
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseAllAvailable">usar todo</button>
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseLast30">últimos 30 días</button>
+                    <button type="button" class="btn btn-link btn-sm py-0" @onclick="UseLast90">últimos 90 días</button>
+                </small>
+            </div>
+        </div>
+    </div>
+</div>
 
-<p><em>Pendiente de implementar: gráfico de share + tabla winrate general con selector de rango de fechas.</em></p>
+@if (_sources.Contains(TournamentSources.Mtgo))
+{
+    <div class="alert alert-warning small py-2">
+        <strong>Aviso:</strong> MTGO publica solo los top finishers de cada Challenge/Preliminary, así que los winrates están <em>infladados</em> (≈65% medio en MTGO vs ≈51% en Melee). Para winrates honestos, deja solo <strong>Melee</strong> seleccionado.
+    </div>
+}
+
+@if (_loading)
+{
+    <p><span class="spinner-border spinner-border-sm me-2"></span>Cargando…</p>
+}
+else if (_snapshot is null || _snapshot.Archetypes.Count == 0)
+{
+    <div class="alert alert-warning">Sin datos en el rango seleccionado.</div>
+}
+else
+{
+    <p class="text-muted small mb-2">
+        <strong>@_snapshot.TotalDecks</strong> decks de
+        <strong>@_snapshot.Archetypes.Count</strong> arquetipos en
+        <strong>@_snapshot.TotalTournaments</strong> torneos.
+        @if (!_includeLeagues)
+        {
+            <span>Leagues 5-0 excluidas.</span>
+        }
+    </p>
+
+    <table class="table table-sm table-hover align-middle">
+        <thead class="table-light">
+            <tr>
+                <th style="width: 22%">Arquetipo</th>
+                <th style="width: 8%" class="text-end">Decks</th>
+                <th style="width: 25%">% del meta</th>
+                <th style="width: 10%" class="text-end">W-L-D</th>
+                <th style="width: 25%">Winrate</th>
+                <th style="width: 10%" class="text-end">Matches</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var s in _sorted)
+            {
+                <tr>
+                    <td>
+                        @if (s.Archetype == "Unknown")
+                        {
+                            <span class="text-muted fst-italic">@s.Archetype</span>
+                        }
+                        else
+                        {
+                            <a href="@ArchetypeLink(s)">@s.Archetype</a>
+                        }
+                    </td>
+                    <td class="text-end">@s.DeckCount</td>
+                    <td>
+                        <div class="d-flex align-items-center gap-2">
+                            <div class="flex-grow-1" style="background: #e9ecef; border-radius: 3px; height: 14px; position: relative;">
+                                <div style="background: #0d6efd; height: 100%; border-radius: 3px; width: @ShareBarWidth(s)%;"></div>
+                            </div>
+                            <small class="text-muted" style="min-width: 3.5em; text-align: right;">@((s.MetaShare * 100).ToString("F1"))%</small>
+                        </div>
+                    </td>
+                    <td class="text-end">
+                        <small>@s.Wins-@s.Losses-@s.Draws</small>
+                    </td>
+                    <td>
+                        @if (s.MatchCount == 0)
+                        {
+                            <small class="text-muted">—</small>
+                        }
+                        else
+                        {
+                            <div class="d-flex align-items-center gap-2">
+                                <div class="flex-grow-1" style="background: #e9ecef; border-radius: 3px; height: 14px; position: relative; overflow: hidden;">
+                                    <div style="background: @WinrateColor(s.Winrate); height: 100%; width: @(s.Winrate * 100).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)%;"></div>
+                                    <div style="position: absolute; top: 0; left: 50%; width: 1px; height: 100%; background: rgba(0,0,0,0.25);"></div>
+                                </div>
+                                <small class="@(s.LowSample ? "text-warning" : "text-muted")" style="min-width: 3.5em; text-align: right;" title="@(s.LowSample ? "Muestra pequeña (<30 matches)" : "")">
+                                    @((s.Winrate * 100).ToString("F1"))%@if (s.LowSample){<text> ⚠</text>}
+                                </small>
+                            </div>
+                        }
+                    </td>
+                    <td class="text-end">
+                        <small class="@(s.LowSample ? "text-warning" : "")">@s.MatchCount</small>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private const string Format = "Modern";
+
+    private enum SortBy { Share, Winrate, DeckCount, Matches }
+
+    private DateTime _from;
+    private DateTime _to;
+    private bool _includeLeagues;
+    private SortBy _sortBy = SortBy.Share;
+    private HashSet<string> _sources = new(StringComparer.Ordinal) { TournamentSources.Melee };
+
+    private bool _loading;
+    private MetagameSnapshot? _snapshot;
+    private List<ArchetypeStat> _sorted = new();
+    private (DateTime Min, DateTime Max)? _availableRange;
+
+    private double _maxShare = 1;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _availableRange = await Query.GetAvailableRangeAsync(Format);
+        if (_availableRange is { } r)
+        {
+            _to = r.Max.Date;
+            _from = r.Max.Date.AddDays(-30);
+            if (_from < r.Min.Date) _from = r.Min.Date;
+        }
+        else
+        {
+            _to = DateTime.UtcNow.Date;
+            _from = _to.AddDays(-30);
+        }
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        StateHasChanged();
+        try
+        {
+            _snapshot = await Query.GetSnapshotAsync(Format, _from, _to.AddDays(1).AddTicks(-1), _includeLeagues, _sources);
+            _maxShare = _snapshot.Archetypes.Count == 0 ? 1 : _snapshot.Archetypes.Max(a => a.MetaShare);
+            if (_maxShare <= 0) _maxShare = 1;
+            ApplySort();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void ApplySort()
+    {
+        if (_snapshot is null) { _sorted = new(); return; }
+        _sorted = _sortBy switch
+        {
+            SortBy.Winrate => _snapshot.Archetypes.OrderByDescending(a => a.Winrate).ThenByDescending(a => a.DeckCount).ToList(),
+            SortBy.DeckCount => _snapshot.Archetypes.OrderByDescending(a => a.DeckCount).ToList(),
+            SortBy.Matches => _snapshot.Archetypes.OrderByDescending(a => a.MatchCount).ToList(),
+            _ => _snapshot.Archetypes.OrderByDescending(a => a.MetaShare).ToList(),
+        };
+    }
+
+    private async Task UseAllAvailable()
+    {
+        if (_availableRange is not { } r) return;
+        _from = r.Min.Date;
+        _to = r.Max.Date;
+        await ReloadAsync();
+    }
+
+    private async Task UseLast30()
+    {
+        var anchor = _availableRange?.Max ?? DateTime.UtcNow.Date;
+        _to = anchor.Date;
+        _from = anchor.Date.AddDays(-30);
+        await ReloadAsync();
+    }
+
+    private async Task UseLast90()
+    {
+        var anchor = _availableRange?.Max ?? DateTime.UtcNow.Date;
+        _to = anchor.Date;
+        _from = anchor.Date.AddDays(-90);
+        await ReloadAsync();
+    }
+
+    private string ShareBarWidth(ArchetypeStat s)
+    {
+        // Scale so the largest archetype fills the bar, others are relative.
+        var pct = _maxShare > 0 ? (s.MetaShare / _maxShare) * 100 : 0;
+        return pct.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string WinrateColor(double wr) => wr switch
+    {
+        >= 0.55 => "#198754",
+        >= 0.50 => "#0d6efd",
+        >= 0.45 => "#ffc107",
+        _ => "#dc3545"
+    };
+
+    private string ArchetypeLink(ArchetypeStat s)
+    {
+        var name = Uri.EscapeDataString(s.Archetype);
+        var src = string.Join(',', _sources);
+        return $"/archetype/{name}?from={_from:yyyy-MM-dd}&to={_to:yyyy-MM-dd}&leagues={_includeLeagues.ToString().ToLowerInvariant()}&sources={Uri.EscapeDataString(src)}";
+    }
+
+    private async Task ToggleSource(string source, bool isChecked)
+    {
+        if (isChecked) _sources.Add(source);
+        else _sources.Remove(source);
+        await ReloadAsync();
+    }
+}

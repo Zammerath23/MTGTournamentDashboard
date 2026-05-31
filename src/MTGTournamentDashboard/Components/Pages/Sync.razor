@@ -1,9 +1,117 @@
 @page "/sync"
+@rendermode InteractiveServer
+@using MTGTournamentDashboard.Sync
+@inject SyncRunner Runner
+@inject SyncProgress Progress
+@implements IDisposable
 
 <PageTitle>Sync</PageTitle>
 
 <h1>Sincronización</h1>
 
-<p>Estado de la sincronización con MTGODecklistCache.</p>
+<p>Trae datos de torneos desde el clon local de <code>MTGODecklistCache</code>. La primera ejecución clona el repositorio (~varios minutos / cientos de MB); las siguientes hacen <code>fetch + reset</code>.</p>
 
-<p><em>Pendiente de implementar: botón de sync inicial (últimos 6 meses), botón de sync incremental, log en vivo vía SignalR.</em></p>
+<div class="d-flex gap-2 align-items-center mb-3 flex-wrap">
+    <button class="btn btn-primary" @onclick="StartSync" disabled="@Progress.IsRunning">
+        @if (Progress.IsRunning)
+        {
+            <span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>
+            <span>Ejecutando…</span>
+        }
+        else
+        {
+            <span>Sync now</span>
+        }
+    </button>
+    <button class="btn btn-outline-primary" @onclick="StartReclassify" disabled="@Progress.IsRunning">
+        Reclasificar todo
+    </button>
+    <button class="btn btn-outline-success" @onclick="StartMeleeDirect" disabled="@Progress.IsRunning"
+            title="Trae torneos Modern recientes de melee.gg que aún no están en Jiliac. Tarda 5-15 min.">
+        Sync Melee directo (7d)
+    </button>
+    <button class="btn btn-outline-secondary" @onclick="Runner.Cancel" disabled="@(!Progress.IsRunning)">
+        Cancelar
+    </button>
+    <span class="text-muted small">
+        @if (Progress.IsRunning)
+        {
+            <span>Paso actual: @Progress.CurrentStep</span>
+        }
+        else if (Progress.FinishedAtUtc is { } finished)
+        {
+            <span>Última ejecución: @finished.ToLocalTime().ToString("HH:mm:ss") (@Progress.CurrentStep)</span>
+        }
+        else
+        {
+            <span>No se ha ejecutado todavía.</span>
+        }
+    </span>
+</div>
+
+@if (!string.IsNullOrEmpty(Progress.LastError))
+{
+    <div class="alert alert-danger">
+        <strong>Error:</strong> @Progress.LastError
+    </div>
+}
+
+<div class="border rounded p-2 bg-light" style="height: 60vh; overflow-y: auto; font-family: Consolas, monospace; font-size: 0.85rem;">
+    @if (_entries.Count == 0)
+    {
+        <em class="text-muted">El log aparecerá aquí cuando lances un sync.</em>
+    }
+    else
+    {
+        @foreach (var e in _entries)
+        {
+            <div style="color: @ColorFor(e.Level);">
+                <span class="text-muted">@e.TimestampUtc.ToLocalTime().ToString("HH:mm:ss")</span>
+                @e.Message
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private readonly List<SyncLogEntry> _entries = new();
+
+    protected override void OnInitialized()
+    {
+        _entries.AddRange(Progress.Snapshot());
+        Progress.OnEntry += HandleEntry;
+        Progress.OnStateChanged += HandleState;
+    }
+
+    private void StartSync() => Runner.TryStartSync();
+
+    private void StartReclassify() => Runner.TryStartReclassifyAll();
+
+    private void StartMeleeDirect() => Runner.TryStartMeleeDirect();
+
+    private async void HandleEntry(SyncLogEntry entry)
+    {
+        _entries.Add(entry);
+        if (_entries.Count > 500) _entries.RemoveRange(0, _entries.Count - 500);
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async void HandleState()
+    {
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private static string ColorFor(SyncLogLevel level) => level switch
+    {
+        SyncLogLevel.Warn => "#a06000",
+        SyncLogLevel.Error => "#a02020",
+        SyncLogLevel.Success => "#107010",
+        _ => "inherit"
+    };
+
+    public void Dispose()
+    {
+        Progress.OnEntry -= HandleEntry;
+        Progress.OnStateChanged -= HandleState;
+    }
+}

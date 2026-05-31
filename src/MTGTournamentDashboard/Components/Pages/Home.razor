@@ -1,4 +1,7 @@
 @page "/"
+@using Microsoft.EntityFrameworkCore
+@using MTGTournamentDashboard.Data
+@inject IDbContextFactory<MetaDbContext> DbFactory
 
 <PageTitle>Dashboard</PageTitle>
 
@@ -6,6 +9,90 @@
 
 <p>Bienvenido al MTG Tournament Dashboard.</p>
 
-<div class="alert alert-info">
-    Aún no hay datos. Ve a <a href="sync">Sync</a> para lanzar la sincronización inicial.
-</div>
+@if (_loading)
+{
+    <p class="text-muted">Cargando resumen…</p>
+}
+else if (_tournamentCount == 0)
+{
+    <div class="alert alert-info">
+        Aún no hay datos. Ve a <a href="sync">Sync</a> para lanzar la sincronización inicial.
+    </div>
+}
+else
+{
+    <div class="row g-3 mb-4">
+        <div class="col-auto">
+            <div class="card text-center">
+                <div class="card-body">
+                    <div class="display-6">@_tournamentCount.ToString("N0")</div>
+                    <div class="text-muted small">Torneos</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-auto">
+            <div class="card text-center">
+                <div class="card-body">
+                    <div class="display-6">@_deckCount.ToString("N0")</div>
+                    <div class="text-muted small">Mazos</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-auto">
+            <div class="card text-center">
+                <div class="card-body">
+                    <div class="display-6">@(_latest?.ToString("yyyy-MM-dd") ?? "—")</div>
+                    <div class="text-muted small">Último torneo</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    @if (_bySource.Count > 0)
+    {
+        <h2 class="h5">Por fuente</h2>
+        <table class="table table-sm w-auto">
+            <thead><tr><th>Fuente</th><th class="text-end">Torneos</th></tr></thead>
+            <tbody>
+                @foreach (var s in _bySource)
+                {
+                    <tr><td>@s.Source</td><td class="text-end">@s.Count.ToString("N0")</td></tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <a class="btn btn-outline-primary btn-sm" href="metagame">Ver metagame</a>
+}
+
+@code {
+    private bool _loading = true;
+    private int _tournamentCount;
+    private int _deckCount;
+    private DateTime? _latest;
+    private List<(string Source, int Count)> _bySource = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        _tournamentCount = await db.Tournaments.CountAsync();
+        if (_tournamentCount == 0)
+        {
+            _loading = false;
+            return;
+        }
+
+        _deckCount = await db.Decks.CountAsync();
+        _latest = await db.Tournaments.MaxAsync(t => (DateTime?)t.Date);
+        _bySource = (await db.Tournaments
+                .GroupBy(t => t.Source)
+                .Select(g => new { Source = g.Key, Count = g.Count() })
+                .OrderByDescending(x => x.Count)
+                .ToListAsync())
+            .Select(x => (x.Source, x.Count))
+            .ToList();
+
+        _loading = false;
+    }
+}
